@@ -76,6 +76,7 @@ class FCViewController: UIViewController, UITableViewDataSource, UITableViewDele
     }
 
   func configureStorage() {
+    storageRef = Storage.storage().reference()
   }
 
   func configureRemoteConfig() {
@@ -117,15 +118,33 @@ class FCViewController: UIViewController, UITableViewDataSource, UITableViewDele
     // Dequeue cell
     let cell = self.clientTable.dequeueReusableCell(withIdentifier: "tableViewCell", for: indexPath)
     // Unpack message from Firebase DataSnapshot
-    let messageSnapshot = self.messages[indexPath.row]
+    let messageSnapshot: DataSnapshot! = self.messages[indexPath.row]
     guard let message = messageSnapshot.value as? [String: String] else { return cell }
     let name = message[Constants.MessageFields.name] ?? ""
-    let text = message[Constants.MessageFields.text] ?? ""
-    cell.textLabel?.text = name + ": " + text
-    cell.imageView?.image = UIImage(named: "ic_account_circle")
-    if let photoURL = message[Constants.MessageFields.photoURL], let URL = URL(string: photoURL),
-        let data = try? Data(contentsOf: URL) {
-        cell.imageView?.image = UIImage(data: data)
+    if let imageURL = message[Constants.MessageFields.imageURL] {
+        if imageURL.hasPrefix("gs://") {
+            Storage.storage().reference(forURL: imageURL).getData(maxSize: INT64_MAX) {(data, error) in
+                if let error = error {
+                    print("Error downloading: \(error)")
+                    return
+                }
+                DispatchQueue.main.async {
+                    cell.imageView?.image = UIImage.init(data: data!)
+                    cell.setNeedsLayout()
+                }
+            }
+        } else if let URL = URL(string: imageURL), let data = try? Data(contentsOf: URL) {
+            cell.imageView?.image = UIImage.init(data: data)
+        }
+        cell.textLabel?.text = "sent by: \(name)"
+    } else {
+        let text = message[Constants.MessageFields.text] ?? ""
+        cell.textLabel?.text = name + ": " + text
+        cell.imageView?.image = UIImage(named: "ic_account_circle")
+        if let photoURL = message[Constants.MessageFields.photoURL], let URL = URL(string: photoURL),
+            let data = try? Data(contentsOf: URL) {
+            cell.imageView?.image = UIImage(data: data)
+        }
     }
     return cell
   }
@@ -174,15 +193,35 @@ class FCViewController: UIViewController, UITableViewDataSource, UITableViewDele
     if #available(iOS 8.0, *), let referenceURL = info[UIImagePickerControllerReferenceURL] as? URL {
       let assets = PHAsset.fetchAssets(withALAssetURLs: [referenceURL], options: nil)
       let asset = assets.firstObject
-      asset?.requestContentEditingInput(with: nil, completionHandler: { (contentEditingInput, info) in
+      asset?.requestContentEditingInput(with: nil, completionHandler: { [weak self] (contentEditingInput, info) in
         let imageFile = contentEditingInput?.fullSizeImageURL
         let filePath = "\(uid)/\(Int(Date.timeIntervalSinceReferenceDate * 1000))/\((referenceURL as AnyObject).lastPathComponent!)"
+        guard let strongSelf = self else { return }
+        strongSelf.storageRef.child(filePath)
+            .putFile(from: imageFile!, metadata: nil) { (metadata, error) in
+                if let error = error {
+                    let nsError = error as NSError
+                    print("Error uploading: \(nsError.localizedDescription)")
+                    return
+                }
+                strongSelf.sendMessage(withData: [Constants.MessageFields.imageURL: strongSelf.storageRef.child((metadata?.path)!).description])
+        }
       })
     } else {
       guard let image = info[UIImagePickerControllerOriginalImage] as? UIImage else { return }
       let imageData = UIImageJPEGRepresentation(image, 0.8)
-      guard let uid = Auth.auth().currentUser?.uid else { return }
       let imagePath = "\(uid)/\(Int(Date.timeIntervalSinceReferenceDate * 1000)).jpg"
+      let metadata = StorageMetadata()
+        metadata.contentType = "image/jpeg"
+        self.storageRef.child(imagePath)
+            .putData(imageData!, metadata: metadata) { [weak self] (metadata, error) in
+                if let error = error {
+                    print("Error uploading: \(error)")
+                    return
+                }
+                guard let strongSelf = self else { return }
+                strongSelf.sendMessage(withData: [Constants.MessageFields.imageURL: strongSelf.storageRef.child((metadata?.path)!).description])
+        }
     }
   }
 
